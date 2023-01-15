@@ -1,0 +1,151 @@
+#####################################################
+# Install CMC Software
+#####################################################
+-   name: Install Cirrus Migrate Cloud Software
+    hosts: azure_demo_hosts
+    vars_files:
+        - ../vars.yaml
+    tasks:
+        -   name: Obtain Project Facts
+            uri:
+                url: "https://api.cloud.cirrusdata.com/projects/{{cdc_project_id}}"
+                url_username: "{{cdc_user}}"
+                url_password: "{{cdc_api_token}}"
+                force_basic_auth: true
+            delegate_to: localhost
+            register: project_details
+
+        -   name: Install Cirrus Migrate Cloud Software
+            win_shell: iex "& { $(irm https://get.cirrusdata.cloud/install-cmc-win) } -rgc {{project_details.json.projectDetails.info.systemRegistrationCode}}"
+            register: out
+
+        -   debug: var=out.stdout_lines
+
+        -   name: Set Host System Name
+            set_fact:
+                host_name: "{{ansible_nodename}}"
+
+        -   name: List All CMC Hosts
+            uri:
+                url: "https://api.cloud.cirrusdata.com/cmc-hosts?project_id={{cdc_project_id}}"
+                url_username: "{{cdc_user}}"
+                url_password: "{{cdc_api_token}}"
+                force_basic_auth: true
+            delegate_to: localhost
+            register: cmc_host_list
+        -   name: Setting Host CMC Deployment Fact
+            vars:
+                jq: "items[?deployment.systemName==`{{ ansible_nodename }}`]"
+            set_fact:
+                cmc_deployment: "{{ cmc_host_list.json | json_query(jq) | first }}"
+
+        -   debug: var=cmc_deployment
+
+        -   name: Setting Host System ID Fact
+            set_fact:
+                host_system_id: "{{ cmc_deployment.deployment.systemId }}"
+#####################################################
+# Re-size source filesystem to make sure all useful data will be migrated
+#####################################################
+-   name: Re-Size Source Partition and Filesystem
+    gather_facts: false
+    hosts: azure_demo_hosts
+    vars_files:
+        - ../vars.yaml
+    tasks:
+        -   name: Resize partition to desired size
+            loop: "{{migration_volumes}}"
+            community.windows.win_partition:
+                drive_letter: "{{item.drive_letter}}"
+                disk_number: "{{item.disk_number}}"
+                partition_size: "{{item.new_size_gib}}GiB"
+#####################################################
+# Allocate Premium SSD v2 in Azure via Cirrus Data Cloud Integrations
+#####################################################
+-   name: Allocate Destination Volumes in Azure
+    hosts: azure_demo_hosts
+    vars_files:
+        - ../vars.yaml
+    tasks:
+        -   name: Prepare Allocation Parameters
+            loop: "{{migration_volumes}}"
+            loop_control:
+                index_var: curr_idx
+            vars:
+                volume_param: '{"name" : "{{host_name}}-drive{{item.drive_letter}}", "capacity" : {{item.new_size_gib * 1024 * 1024 * 1024 }}, "uuid": "{{ 999999| random | to_uuid }}", "params" : { "azure" : {"storage_type":"PREMIUM_SSD_V2"}}}'
+            set_fact:
+                volume_params: "{{ volume_params | default([]) + [volume_param] }}"
+
+        -   name: Test Azure Integration from Host
+            uri:
+                url: "https://api.cloud.cirrusdata.com/galaxycomplete.api.gm.GalaxyMigrateService/TestAutoAllocConnection"
+                url_username: "{{cdc_user}}"
+                url_password: "{{cdc_api_token}}"
+                force_basic_auth: true
+                method: POST
+                body_format: json
+                body:
+                    system_id: "{{host_system_id}}"
+                    integration_id: "{{cdc_azure_integration_id}}"
+                    status_id: "f1acbd39-e120-4068-9a3c-92bcf329{{ 9999 | random(start=1000) }}"
+            delegate_to: localhost
+
+        -   name: Allocation Parameters
+            debug: var=volume_params
+
+        -   name: Allocate Destination Volumes from Azure
+            uri:
+                url: "https://api.cloud.cirrusdata.com/galaxycomplete.api.gm.GalaxyMigrateService/AutoAllocVolumes"
+                url_username: "{{cdc_user}}"
+                url_password: "{{cdc_api_token}}"
+                force_basic_auth: true
+                method: POST
+                body_format: json
+                timeout: 600
+                body:
+                    system_id: "{{host_system_id}}"
+                    integration_id: "{{cdc_azure_integration_id}}"
+                    status_id: "f1acbd39-e120-4068-9a3c-32bcf329{{ 9999 | random(start=1000) }}"
+                    volumes: "{{volume_params}}"
+            delegate_to: localhost
+            register: autoalloc_response
+
+        -   name: Allocation Completed
+            debug: var=autoalloc_response.json
+#####################################################
+# Trigger Migration Sessions
+#####################################################
+-   name: Create Migration Sessions
+    hosts: azure_demo_hosts
+    vars_files:
+        - ../vars.yaml
+    tasks:
+        -   name: Prepare Migration Volumes Parameters
+            loop: "{{migration_volumes}}"
+            loop_control:
+                index_var: curr_idx
+            vars:
+                vol_param: '{"source_device_name" : "\\\\.\\PHYSICALDRIVE{{item.disk_number}}", "destination_device_name" : {{ autoalloc_response.json.allocateResponse.allocatedVolumes[curr_idx].devicePath | to_json }}}'
+            set_fact:
+                vol_params: "{{ vol_params | default([]) + [vol_param] }}"
+
+        -   debug:
+                var: vol_params
+
+        -   name: Create Migration Session in Cirrus Data Cloud
+            uri:
+                url: "https://api.cloud.cirrusdata.com/migration-sessions"
+                url_username: "{{cdc_user}}"
+                url_password: "{{cdc_api_token}}"
+                force_basic_auth: true
+                method: POST
+                body_format: json
+                timeout: 600
+                body:
+                    system_id: "{{host_system_id}}"
+                    auto_resync_interval: "3600s"
+                    qos_level: "RELENTLESS"
+                    vols: "{{vol_params}}"
+            delegate_to: localhost
+            register: create_migration_response
+

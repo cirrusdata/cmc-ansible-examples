@@ -1,0 +1,5 @@
+
+cdc_user: first.last@company.com
+cdc_api_token: API-TOKEN-OBTAINED-FROM-MY-PROFILE
+cdc_project_id: PROJECT ID OBTAINED FROM URL
+cdc_azure_integration_id: INTEGRATION ID OBTAINED FROM URL

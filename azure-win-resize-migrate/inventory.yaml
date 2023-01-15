@@ -1,0 +1,26 @@
+azure_demo_hosts:
+    hosts:
+        demo-vm1:
+            ansible_host: 1.2.3.4
+            ansible_user: cirrus
+            ansible_password:
+            ansible_shell_type: cmd
+            migration_volumes:
+                - disk_number: 2
+                  drive_letter: F
+                  new_size_gib: 8
+                - disk_number: 3
+                  drive_letter: G
+                  new_size_gib: 8
+        demo-vm2:
+            ansible_host: 1.2.3.4
+            ansible_user: cirrus
+            ansible_password:
+            ansible_shell_type: cmd
+            migration_volumes:
+                - disk_number: 2
+                  drive_letter: F
+                  new_size_gib: 8
+                - disk_number: 3
+                  drive_letter: G
+                  new_size_gib: 8

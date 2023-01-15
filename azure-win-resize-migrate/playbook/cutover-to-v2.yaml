@@ -1,0 +1,125 @@
+-   name: Cutover Migration to New Volumes
+    hosts: azure_demo_hosts
+    vars_files:
+        - ../vars.yaml
+    tasks:
+        ################
+        # Identify entities
+        ################
+        -   name: Set Host System Name
+            set_fact:
+                host_name: "{{ansible_nodename}}"
+
+        -   name: List All CMC Hosts
+            uri:
+                url: "https://api.cloud.cirrusdata.com/cmc-hosts?project_id={{cdc_project_id}}"
+                url_username: "{{cdc_user}}"
+                url_password: "{{cdc_api_token}}"
+                force_basic_auth: true
+            delegate_to: localhost
+            register: cmc_host_list
+
+        -   name: List All Migration Sessions
+            uri:
+                url: "https://api.cloud.cirrusdata.com/project/{{cdc_project_id}}/migration-sessions"
+                url_username: "{{cdc_user}}"
+                url_password: "{{cdc_api_token}}"
+                force_basic_auth: true
+            delegate_to: localhost
+            register: migration_sessions_list
+        -   debug: var=migration_sessions_list.json
+
+        -   name: Setting Host Migration Session Fact
+            vars:
+                jq: "items[?deployment.systemName==`{{ ansible_nodename }}`]"
+            set_fact:
+                migration_session: "{{ migration_sessions_list.json | json_query(jq) | first }}"
+        ################
+        # cMotion
+        ################
+        -   name: Trigger cMotion
+            uri:
+                url: "https://api.cloud.cirrusdata.com/migration-sessions/{{migration_session.sessionId}}/actions:cutover"
+                method: POST
+                url_username: "{{cdc_user}}"
+                url_password: "{{cdc_api_token}}"
+                force_basic_auth: true
+            delegate_to: localhost
+            when: "migration_session.sessionStatus != 'STANDING_IN'"
+
+
+        -   name: Wait for Migration Session to be in cMotion
+            delegate_to: localhost
+            uri:
+                url: "https://api.cloud.cirrusdata.com/migration-sessions/{{migration_session.sessionId}}"
+                url_username: "{{cdc_user}}"
+                url_password: "{{cdc_api_token}}"
+                force_basic_auth: true
+            register: migration_session_details
+            delay: 3
+            retries: 100
+            until: "migration_session_details.json.session.sessionInfo.sessionStatus == 'STANDING_IN'"
+
+        -   name: Trigger Finalize Cutover
+            delegate_to: localhost
+            uri:
+                url: "https://api.cloud.cirrusdata.com/migration-sessions/{{migration_session.sessionId}}/actions:final-cutover"
+                method: POST
+                url_username: "{{cdc_user}}"
+                url_password: "{{cdc_api_token}}"
+                force_basic_auth: true
+            when: "migration_session_details.json.session.sessionInfo.sessionStatus != 'CUTOVER'"
+
+        -   name: Wait for Migration Session to be in cutover state
+            delegate_to: localhost
+            uri:
+                url: "https://api.cloud.cirrusdata.com/migration-sessions/{{migration_session.sessionId}}"
+                url_username: "{{cdc_user}}"
+                url_password: "{{cdc_api_token}}"
+                force_basic_auth: true
+            register: migration_session_details
+            delay: 3
+            retries: 100
+            until: "migration_session_details.json.session.sessionInfo.sessionStatus == 'CUTOVER'"
+        ################
+        # Final Cutover: Stop IO, Quick Unmount and Remount
+        ################
+        -   name: Stop Application and Offline Source Volumes
+            loop: "{{migration_volumes}}"
+            win_shell: "Set-Disk -isoffline $True -number {{item.disk_number}}"
+
+
+        -   name: Trigger Migration Completion
+            delegate_to: localhost
+            uri:
+                url: "https://api.cloud.cirrusdata.com/migration-sessions/{{migration_session.sessionId}}/actions:cancel"
+                method: POST
+                url_username: "{{cdc_user}}"
+                url_password: "{{cdc_api_token}}"
+                force_basic_auth: true
+
+        -   name: Wait for Migration Session to be in cutover state
+            delegate_to: localhost
+            uri:
+                url: "https://api.cloud.cirrusdata.com/migration-sessions/{{migration_session.sessionId}}"
+                url_username: "{{cdc_user}}"
+                url_password: "{{cdc_api_token}}"
+                force_basic_auth: true
+            register: migration_session_details
+            delay: 2
+            retries: 40
+            until: "migration_session_details.json.session.sessionInfo.sessionStatus == 'COMPLETED'"
+
+        -   name: Rescan Storage Partitions
+            win_shell: '"rescan" | diskpart'
+            register: rescan_out
+
+        -   debug: var=rescan_out.stdout_lines
+        ################
+        # Uninstall Cirrus Migrate Cloud Software
+        ################
+        -   name: Un-Install Cirrus Migrate Cloud Software
+            win_shell: iex "& { $(irm https://get.cirrusdata.cloud/install-cmc-win) } -uninstall"
+            register: uninstall_out
+
+        -   debug: var=uninstall_out.stdout_lines
