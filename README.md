@@ -1,4 +1,4 @@
-# CMC Ansible Playbook Examples
+# Cirrus Migrate Cloud Ansible Playbook Examples
 
 This repository is a series of Ansible Playbooks that automates live migrations end-to-end, from installation to migration and cutover, using Cirrus Data Cloud's REST API.
 
